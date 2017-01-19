@@ -10,6 +10,7 @@ namespace MSP_Portal.Entities
         public int UserId { get; set; }
         [ForeignKey("UserId")]
         public User User { get; set; }
+        public string Name { get; set; }
         public int ActivityTypeId { get; set; }
         [ForeignKey("ActivityTypeId")]
         public ActivityType ActivityType { get; set; }
