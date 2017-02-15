@@ -1,78 +1,130 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.Net;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Bot.Connector;
+using Microsoft.Extensions.Configuration;
+using MSP_Portal.MessageProcessors;
 
 namespace MSP_Portal.Controllers
 {
+    /// <summary>
+    /// Контроллео обработки сообщений.
+    /// </summary>
     [Route("api/[controller]")]
     public class MessagesController : Controller
     {
-        static MessagesController()
+        /// <summary>
+        /// Хранилище конфигурации.
+        /// </summary>
+        protected readonly IConfigurationRoot configuration;
+
+        /// <summary>
+        /// Словарь с обработчиками типов команд.
+        /// </summary>
+        protected Dictionary<string, IMessageProcessor> _processors;
+        
+        /// <summary>
+        /// Публичный конструктор контроллера.
+        /// </summary>
+        /// <param name="configuration">Конфигурация.</param>
+        public MessagesController(IConfigurationRoot configuration)
         {
-            _processors = new Dictionary<string, IMessageProcessor>();
-            _processors.Add("user", new MSP_Portal.MessageProcessors.UsersProcessor());
+            // Передача параметров конфигурации.
+            this.configuration = configuration;
+            // Конфигурирование обработчиков по умолчанию.
+            ProcessorsInit();
         }
 
+        /// <summary>
+        /// Метод конфигурирования обработчиков по умолчанию.
+        /// </summary>
+        protected virtual void ProcessorsInit()
+        {
+            // Инициализация словаря с набором процессоров-обработчиков.
+            Dictionary<string, IMessageProcessor> processors = new Dictionary<string, IMessageProcessor>();
+            // Добавление обработчика операций над пользователем.
+            processors.Add("user", new UsersProcessor());
+            // Установка конфигурации обработчиков.
+            ProcessorsInit(processors);
+        }
+
+        /// <summary>
+        /// Метод установки конфигурации обработчиков.
+        /// </summary>
+        /// <param name="processors">Конфигурация обработчиков.</param>
+        public virtual void ProcessorsInit(Dictionary<string, IMessageProcessor> processors)
+        {
+            // Передача параметров конфигурации.
+            _processors = processors;
+        }
+        
+        /// <summary>
+        /// Метод обработки POST-запросов.
+        /// </summary>
+        /// <param name="activity">Сообщение формата Bot Framework</param>
+        /// <returns>HTTP код ответа.</returns>
+        [Authorize(Roles = "Bot")]
         [HttpPost]
-        public string Post([FromBody]string message)
+        public virtual async Task<StatusCodeResult> Post([FromBody]Activity activity)
         {
-            try
+            // Инициализация буффера под HTTP код для ответа.
+            HttpStatusCode responseCode = HttpStatusCode.OK;
+            // Определение типа сообщения.
+            switch (activity.Type)
             {
-                int id = 0; // TODO
-                string[] part = message.Split(' ');
-                string[] header = part[0].Split('.');
-                string type = header[0].ToLower();
-                string operation = header[1].ToLower();
-                string[] args = new string[part.Length - 1];
-                Array.Copy(part, 1, args, 0, args.Length);
-                return _processors[type].Process(new Message(id, type, operation, args));
+                // Сообщение от пользователя.
+                case ActivityTypes.Message:
+                    // Инициализация буффера под текст сообщения ответа.
+                    Activity answer = activity.CreateReply();
+                    // Получение учётных данных из конфигурации.
+                    MicrosoftAppCredentials appCredentials = new MicrosoftAppCredentials(configuration);
+                    // Подключение к Bot Framework'у.
+                    using (ConnectorClient connector = new ConnectorClient(new Uri(activity.ServiceUrl), appCredentials))
+                    {
+                        try
+                        {
+                            // Получение идентификатора диалога.
+                            string id = activity.Conversation.Id;
+                            // Разбиение сообщения на части.
+                            string[] part = activity.Text.Split(' ');
+                            // Разбиение заголовка на части.
+                            string[] header = part[0].Split('.');
+                            // Получение типа модуля команд.
+                            string type = header[0].ToLower();
+                            // Получение типа команды.
+                            string operation = header[1].ToLower();
+                            // Получение аргументов сообщения.
+                            string[] args = part[1].Split(';');
+                            // Проверка на наличие модуля обработчиков.
+                            if (_processors.ContainsKey(type))
+                            {
+                                // Выполнение обработки сообщения.
+                                _processors[type].Process(new Message(id, type, operation, args), ref answer);
+                            }
+                            else
+                            {
+                                // Выбрасывание исключения об отсутствии поддержки модуля обработчика.
+                                throw new NotImplementedException("Not supported type.");
+                            }
+                        }
+                        // Отлавливание исключений.
+                        catch (Exception e)
+                        {
+                            // Установка кода ошибки.
+                            responseCode = HttpStatusCode.InternalServerError;
+                            // Возврат информации об ошибке.
+                            answer.Text = "ERROR: " + e.Message;
+                        }
+                        // Отправка ответного сообщения.
+                        await connector.Conversations.ReplyToActivityAsync(answer);
+                    }
+                    break;
             }
-            catch (Exception e)
-            {
-                Response.StatusCode = (int)System.Net.HttpStatusCode.InternalServerError;
-                return "ERROR: " + e.Message;
-            }
+            // Возврат кода результата выполнения.
+            return new StatusCodeResult((int)responseCode);
         }
-        public interface IMessageProcessor
-        {
-            string Process(Message message);
-        }
-
-        public delegate string MessageProcess(int id, string[] args);
-
-        public abstract class MessageProcessor : MSP_Portal.Controllers.MessagesController.IMessageProcessor
-        {
-            public Dictionary<string, MessageProcess> Processors { get; set; }
-            public string Process(MSP_Portal.Controllers.MessagesController.Message message)
-            {
-                if (Processors.ContainsKey(message.Operation))
-                {
-                    return Processors[message.Operation]?.Invoke(message.Id, message.Args);
-                }
-                else
-                {
-                    throw new NotSupportedException("Not supported operation.");
-                }
-            }
-        }
-
-        public class Message
-        {
-            public int Id { get; private set; }
-            public string Type { get; private set; }
-            public string Operation { get; private set; }
-            public string[] Args { get; private set; }
-            public Message(int id, string type, string operation, string[] args)
-            {
-                Id = id;
-                Type = type;
-                Operation = operation;
-                Args = args;
-            }
-        }
-
-        private static Dictionary<string, IMessageProcessor> _processors { get; }
     }
 }
